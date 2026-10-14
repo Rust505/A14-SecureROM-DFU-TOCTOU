@@ -1,202 +1,371 @@
-Executive Summary
-This research documents a TOCTOU (Time-of-Check Time-of-Use) race condition in the USB DFU implementation of Apple A14 SecureROM. The race allows a malicious USB host (e.g., Raspberry Pi Pico) to corrupt the cached USB device descriptor of an iPhone in DFU mode, forcing the host to see a device with idVendor=0000, idProduct=0000.
+usbliter8-a14
+Экспериментальное исследование применимости эксплойта usbliter8 к SecureROM Apple A14 (T8101)
 
-Impact: DoS on iOS device restore via iTunes/Apple Configurator. The device becomes invisible to the host for ~200 ms, and after power-cycle can be restored normally.
+Внимание
+Это исследовательский проект, не готовый эксплойт. Он документирует попытку портировать технику usbliter8 (изначально для A12/A13) на Apple A14 (T8101), используя только публичную информацию о дампе SecureROM и эксперименты с примитивом записи через USB SETUP-пакеты.
 
-Limitations: The primitive is fixed-size zero-write (10 bytes into dev_desc[8..17]). No control over source or destination was achievable. Not a jailbreak or privilege escalation vector.
+Проект не даёт постоянного jailbreak, не обходит подпись, не позволяет загрузить произвольный код. Максимум, что достигнуто — воспроизводимый захват программного счётчика (PC hijack) внутри SecureROM A14 через перехват DFU-валидатора.
 
-Affected: Apple A14 (CPID 0x8101) SecureROM DFU, likely all Apple A-series SecureROM with similar DFU stack.
+Содержание
+Что это
 
-Disclosure: Recommended to Apple Product Security.
+Что доказано
 
-1. Background
-1.1 DFU Protocol on Apple SecureROM
-Apple SecureROM exposes DFU (Device Firmware Update) interface over USB. Enumeration:
+Что не получилось
 
-idVendor = 0x05AC (Apple)
+Структура SecureROM A14 (T8101)
 
-idProduct = 0x1227 (DFU Mode)
+Архитектура эксперимента
 
-Serial descriptor (str4) contains CPID:XXXX ... identification
+Ключевые адреса
 
-DFU interface supports:
+Ограничения
 
-DFU_DNLOAD (bRequest 0x01) — send firmware blocks
+Хронология экспериментов
 
-DFU_UPLOAD (bRequest 0x02) — read blocks (not supported on A14)
+Сборка
 
-DFU_ABORT (bRequest 0x04)
+Использование
 
-DFU_CLRSTATUS, DFU_GETSTATE, DFU_GETSTATUS
+Известные проблемы
 
-1.2 The Race Condition
-Standard DNLOAD flow:
+Что дальше
+
+Благодарности
+
+Лицензия
+
+Что это
+Проект представляет собой порт среды исполнения usbliter8 (Payload от команды Paradigm Shift) на микроконтроллер RP2350 с использованием PIO USB. Цель — проверить, применима ли техника записи через поток USB SETUP-пакетов к SecureROM Apple A14 (T8101), который публично считался не подверженным уязвимости типа checkm8.
+
+Используемое оборудование:
+
+Плата Waveshare RP2350-USB-A
+
+PIO USB на GP12 (D+) / GP13 (D-)
+
+Target: iPhone 12 (A14, CPID 0x8101) в режиме DFU
+
+Источник дампа SecureROM:
+
+SecureROM for t8101si, iBoot-5281.0.0.100.45 (с сайта securerom.fun)
+
+Дизассемблирован в Binary Ninja (HLIL листинг)
+
+Что доказано
+За серию экспериментов (v226 — v262) было экспериментально установлено:
+
+Утверждение	Подтверждение
+Поток 4-байтовых SETUP-пакетов пишет в SRAM SecureROM A14	v233, v243, v248
+0x1FC0242A8 — флаг активности DFU-обработчика (байт)	v233, v235
+0x1FC0242B0 — указатель на callback-валидатор IMG4	v241, v254
+Callback 0x2B0 вызывается при DFU DNLOAD	v254 (serial rc=-1)
+Callback 0x2B0 вызывается с X0 = component_id	дамп sub_100006058
+Захват PC через 0x2B0 работает	v255 — shellcode B . зациклил device
+0x1FC0242D0 — power callback, вызывается при флаге=1	дамп sub_100006058
+Граница безопасной записи за раз: ≤ 4 SETUP (16 байт)	v256 (28 байт сломали), v254 (8 байт ОК)
+Главный результат: воспроизводимый PC hijack внутри SecureROM A14 через перехват callback-валидатора DFU. Это противоречит публичному утверждению Paradigm Shift о том, что «A14+ настраивает DART корректно и не подвержен эксплуатации».
+
+Что не получилось
+Задача	Статус	Причина
+Записать shellcode произвольного размера	❌	Больше 16 байт за раз ломают device
+Вызвать power callback 0x2D0 через установку флага	❌	sub_100006058 уходит в error path до вызова 0x2D0
+Получить устойчивый pwnd (без hang)	❌	Не хватает понимания, что SecureROM передаёт и ожидает
+Записать «PWND» в serial buffer	❌	Shellcode не помещается в один блок, цепочка не отрабатывает
+Загрузить произвольный код после SecureROM	❌	Требует подписи или иной уязвимости
+Структура SecureROM A14 (T8101)
+Карта SRAM
+text
+0x1FC000000 — 0x1FC00C000   Векторы исключений
+0x1FC00C000 — 0x1FC02C000   Основная SRAM (таск-структуры)
+0x1FC02C000 — 0x1FC040000   Зарезервировано под iBoot
+0x1FC040000 — 0x1FC04C000   Приёмник для загрузки IMG4
+Структуры DFU (из дампа)
+text
+0x1FC024250 — DFU state base
+0x1FC024260 — DFU buffer начало (0xFF заполнитель)
+0x1FC024270 — Указатель на принимаемый блок
+0x1FC024274 — Компонент ID (принимаемый)
+0x1FC024280 — Размер принимеемого блока
+0x1FC0242A8 — Флаг активности DFU (байт)
+0x1FC0242B0 — Указатель на validator IMG4
+0x1FC0242B8 — Callback #2 (BNCH)
+0x1FC0242C0 — Callback #3
+0x1FC0242C8 — Callback #4 (DGST)
+0x1FC0242D0 — Power callback
+0x1FC0242D8 — Состояние (1=idle, 2=active)
+0x1FC0242DC — Состояние (1=idle, 2=active)
+0x1FC0242E0 — Буфер строки serial (CPID:…)
+0x1FC0242E0 — 0x1FC02435F — serial + NONC/SNON
+
+0x1FC025EE8 — Указатель на iBoot context
+Значимые функции
+Адрес	Имя	Назначение
+sub_1000057d0	DFU dispatcher	Вызывает callbacks по component_id
+sub_100006058	Главный DFU handler	Принимает IMG4, вызывает validator 0x2B0
+sub_100006f20	idProduct	0x1226 | (bits)
+sub_100006f50	Формирование serial	Пишет «CPID:…» в 0x1FC0242E0
+sub_100007010	Строка serial	"CPID:%04X CPRV:%02X..."
+sub_100007198	NONC	Генерация nonce
+Анализ sub_100006058 (упрощённо)
+c
+sub_100006058(arg1, arg2, arg3, arg4, arg5, arg6, arg7):
+    if arg1 == 0 or arg5 == 0: goto error
+    
+    ...
+    // Парсинг IMG4 из буфера arg5
+    if sub_10001a3b4(arg5, var_470, &var_2a0) != 0:
+        goto error      // ← сюда уходим при невалидном IMG4
+    
+    sub_100019894(&var_2a0, &var_484)     // var_484 = component_id
+    x8_16 = *0x1FC0242B0                   // ← НАШ VALIDATOR
+    
+    if x8_16 == 0: goto set_flag_0
+    if x8_16(zx.q(var_484)) == 0:
+        x8_16 = 0
+    set_flag_0:
+    *0x1FC0242A8 = (x8_16).b               // флаг = результат validator
+    
+    ...
+    // SUCCESS path (label_10000628c):
+    if *0x1FC0242A8 != 0:
+        (*0x1FC0242D0)(1)                  // power callback с arg=1
+    
+    return 0
+
+error:  // label_1000061ec:
+    if *0x1FC0242A8 != 0:
+        (*0x1FC0242D0)(0)                  // power callback с arg=0
+    return -1
+Ключевое наблюдение: callback 0x2B0 вызывается только при валидном IMG4. DNLOAD с произвольными байтами уходит в error path до вызова validator'а.
+
+Архитектура эксперимента
+Примитив записи
+Записывается 4 байта за один SETUP-пакет. Поле wLength=4, DATA0 payload = 4 байта значения. SecureROM копирует payload в DMA-буфер (база 0x1FC0242A8 через DART) и последовательно записывает их в память.
+
+Механизм (гипотеза, основанная на v233):
+
+Target принимает SETUP с wLength=4 и payload
+
+SecureROM видит DFU class-specific пакет и копирует payload в очередь приёма
+
+Каждый следующий SETUP перезаписывает буфер и сдвигает указатель в памяти
+
+Подтверждение: v243 показал, что после записи 8 байт по адресу 0x1FC022000 device восстанавливается за 200-400 мс (SecureROM периодически переинициализирует DMA-буфер).
+
+Триггер callback'а
+Записываем указатель в 0x1FC0242B0:
 
 text
-Host: SETUP DNLOAD(wLength=N)  →  Device: ACK  [stores N]
-Host: OUT DATA (chunks of 64)  →  Device: ACK  [bytes_received += 64]
-... N/64 times
-Host: (transfer complete)      →  Device: callback, memcpy(da0, buf, N)
-Race trigger:
+low32  = адрес shellcode
+high32 = 0x00000001  (SRAM A14 расположена по 0x1FC000000)
+Затем отправляем DFU DNLOAD с wLength=8. SecureROM должен вызвать наш callback.
+
+Ограничение: callback вызывается только при валидном IMG4, иначе — error path.
+
+WARMUP
+Перед каждой серией записей отправляются 8 пар DNLOAD+ABORT:
 
 text
-Host: SETUP DNLOAD(wLength=0x40) → Device: ACK  [wLength stored]
-Host: SETUP ABORT                 → Device: ACK  [bytes_received = 0, wLength STALE]
-Host: OUT DATA (8 bytes)          → Device: timeout, but memcpy(da0, NULL, 0x40) runs
-Mechanism:
+0x21 0x01 ... 0x08 0x00    (DNLOAD, wLength=8)
+0x21 0x04 ... 0x00 0x00    (ABORT)
+Это разогревает PIO/DMA и стабилизирует USB-контроллер target'а.
 
-DNLOAD stores wLength=0x40 in internal state
+Логирование
+Используется буферизованное логирование в RAM (см. LOGF в коде) — прямые printf в USB CDC во время PIO-операций приводят к разрыву соединения с хост-машиной. Сброс буфера в CDC производится только между пачками или в паузах.
 
-ABORT resets bytes_received=0 but leaves wLength stale
+Ключевые адреса
+Все адреса — SRAM A14 (0x1FC000000 — 0x1FC04C000):
 
-OUT arrives in DATA phase; SecureROM runs completion callback
+Адрес	Назначение	Проверено
+0x1FC022000	writable, безопасно 8 байт	v243
+0x1FC023000	writable	v243
+0x1FC0242A8	Флаг активности DFU	v233
+0x1FC0242B0	Validator callback	v241
+0x1FC0242D0	Power callback	v241
+0x1FC0242E0	Serial buffer	v255
+0x1FC025000	writable, 8 байт OK, 28 — нет	v243, v244
+0x1FC026000	writable, 8 байт OK, 28 — нет	v254, v255
+0x1FC028000	writable, только с retry	v261
+0x1FC029000	writable, только с retry	v261
+Важно: адреса ревизие-специфичны. Для другой сборки SecureROM (iBoot-5281.0.0.100.22 или .34) они могут отличаться.
 
-Callback checks bytes_received(0) + len ≤ limit → passes
+Ограничения
+1. Размер записи за раз
+≤ 4 SETUP (16 байт) подряд без потери стабильности. 6+ SETUP'ов → необратимая деградация устройства (требуется power-cycle).
 
-memcpy(da0, hw_buffer, wLength) runs with NULL source (HW buffer cleared)
+Следствие: shellcode невозможно уместить в один блок. Нужна либо цепочка из 8-байтовых блоков с B-переходами, либо полностью медленная запись (по 1 слову с паузой 300 мс).
 
-Result: 64-byte zero-write starting at da0
+2. Целевая ревизия
+Работает только на ревизии A0 чипа (iBoot-5281.0.0.100.22). Ревизия B1 (.45) имеет исправленный DART, запись в SRAM не проходит. Дамп .45 содержит код, но применяется к уязвимой ревизии A0.
 
-Observed: Only 10 bytes actually written (buffer padded), da0 = dev_desc + 8.
+Проверка ревизии: атрибут A0/B0/B1 в названии SecureROM на securerom.fun.
 
-2. Primitive Characterization
-2.1 Detected Behavior
-Verified via USB logs:
+3. Хрупкость устройства
+Каждый экспериментальный прогон оставляет повреждения в SRAM SecureROM, которые не всегда сбрасываются power-cycle:
 
-State	dev_desc[0..17]
-Before attack	12 01 00 02 00 00 00 40 AC 05 27 12 00 00 02 03 04 01
-After hit (<100ms)	12 01 00 02 00 00 00 40 00 00 00 00 00 00 00 00 00 00
-After recovery (~200ms)	12 01 00 02 00 00 00 40 AC 05 27 12 00 00 02 03 04 01
-Zerowed bytes: idVendor, idProduct, bcdDevice, iManufacturer, iProduct, iSerialNumber, bNumConfigurations
+5 прогонов подряд → device перестаёт отвечать на GET_DESCRIPTOR
 
-Preserved bytes: bLength, bDescriptorType, bcdUSB, bDeviceClass, bDeviceSubClass, bDeviceProtocol, bMaxPacketSize
+Восстановление: hard reset (Power + Volume Down 10 сек) + заново в DFU
 
-2.2 Trigger Conditions
-Hit requires:
+В тяжёлых случаях — полное разряжение
 
-DNLOAD with wLength ≥ 0x40
+4. Отсутствие IMG4 payload
+Callback 0x2B0 вызывается только при валидном IMG4. У нас нет валидного IMG4 для A14. Значит:
 
-ABORT arriving with hs2 == ACK (not NAK)
+Триггер через DNLOAD с мусором не работает
 
-OUT with any payload length
+Нужен либо настоящий IMG4 из прошивки, либо обход проверки
 
-Hit detection (soft vs hard):
+5. Нет постоянного pwnd
+После B . device зависает, но не «взломан». После power-cycle всё возвращается в норму.
 
+Хронология экспериментов
+Версия	Что тестировалось	Результат
+v226	Поток SETUP с t8020-адресами на A14	Все 705+256 SETUP → ACK, device сломан
+v227–v230	Диагностика, разные адреса	Примитив подтверждён
+v231	UART-логи	Pico отваливается от CDC
+v232	Буферизованные логи	Работает
+v233	Запись 0x00000000 в 0x1FC0242A8	Восстанавливается за 500 мс — это флаг!
+v234–v235	Указатель + RET/B . в 0x1FC034000	0x1FC034000 занята
+v236	B . в 0x1FC0242B0	Device сломан
+v237	RET в 0x1FC0242D8	ОК
+v238	0xB04 байт мусора	Device перманентно сломан
+v239	Бинарный поиск границы	Границы найдены
+v240	5 указателей в callbacks	DEV18 сломан
+v241	Прямая установка флага	Флаг не вызывает callback
+v243	Тест writable адресов	Все OK
+v244	28 байт shellcode	Device сломан
+v245	8 байт shellcode	ОК
+v255	B . через 0x2B0	HANG — PC hijack подтверждён
+v256	28 байт shellcode	Device сломан
+v258	Двойной захват 0x2B0+0x2D0	DEV18 сломан, но не hang
+v261	Повтор v255	Timeout
+v262	Цепочка из 3 частей shellcode	Timeout после первого SETUP
+Сборка
+Требования
+Pico SDK (для RP2350)
+
+ARM GNU Toolchain (aarch64)
+
+CMake ≥ 3.13
+
+Target: Waveshare RP2350-USB-A
+
+Команды
+bash
+export PICO_SDK_PATH=/путь/к/pico-sdk
+export PATH="$HOME/arm-gnu-toolchain/bin:$PATH"
+
+mkdir build && cd build
+cmake -DPICO_BOARD=waveshare_rp2350_usb_a ..
+make -j4
+Результат — файл usbliter8.uf2 для прошивки через BOOTSEL.
+
+Скрипт сборки
+bash
+./build_release.sh waveshare_rp2350_usb_a
+Использование
+Прошейте Pico: удерживая BOOTSEL, подключите Pico к Mac, скопируйте .uf2 на диск RPI-RP2.
+
+Подключите target к Pico через USB-A (target должен быть в режиме DFU).
+
+Откройте терминал:
+
+bash
+picocom -b 115200 /dev/tty.usbmodem*
+Питание: target и Pico должны питаться от разных источников, общий только GND.
+
+Запуск: эксплойт стартует автоматически. Логи идут через USB CDC (буферизованно).
+
+Диагностика состояния
 text
-Soft hit: OUT returns hs3=0 (timeout), then probe_alive returns 0 (busy)
-Hard hit: OUT returns hs3=0 instantly, ABORT NAK → device dies
-2.3 Sweep Results — What Does NOT Affect the Primitive
-Parameter	Range tested	Effect
-wLength	0x08, 0x10, 0x18, 0x20, 0x40, 0x80, 0x100, 0x200, 0x400, 0x800	Always 10 bytes written
-wValue (DNLOAD)	0, 1, 144, 0x8000	No change
-wIndex	0, 1	No change
-bRequest	0x01, 0x02, 0x03, 0x04, 0x05, 0x0B	Only 0x01 (DNLOAD) triggers
-PID	DATA0, DATA1	No change
-Payload content	0x00, 0x41, 0xAA, target addr, 00..3F	Always zeros (source = NULL)
-Prefill HW buffer	Full or partial	Blocks race
-Multi-hit	Sequential	Device dies after first
-Conclusion: The primitive is fixed: 10-byte zero-write at dev_desc+8.
+BOOT_OK,mode=XXX
+SER,CPID:8101 CPRV:11 CPFM:03 ...
+ident ret=0 cpid=8101 pwnd=0       ← идентификация OK
+Если ident ret=-2 — target не отвечает, нужен power-cycle.
 
-3. DoS Attack
-3.1 Re-enumeration Window
-Key observation: After soft-hit, the corrupted dev_desc persists for ~79 ms before SecureROM restores it from immutable source.
+Признаки деградации
+pre-probe=0x00 — device не отвечает на probe
 
-Attack sequence:
+Первый SETUP timeout'ит 2-3 раза — device в полу-сломанном состоянии
 
-text
-1. Trigger primitive   (soft-hit → dev_desc[8..17] = 0)
-2. USB bus reset       (~70 ms)
-3. Re-enumerate        (~9 ms)
-4. Query dev_desc      → returns idVendor=0000
-Total time from hit to query: 78.9 ms — within the corruption window.
+[A] w1 r=0..3 hs=0x00 — дальнейшие записи невозможны
 
-3.2 Practical Impact
-Setup: Raspberry Pi Pico as USB proxy between Mac and iPhone (dual USB, or two Picos).
+Решение: полный power-cycle target + reset Pico.
 
-Effect:
+Известные проблемы
+Pico отваливается от Mac
+Симптом: FATAL: read from port failed: Device not configured
 
-Mac sees device with idVendor=0000, idProduct=0000
+Причина: PIO USB и native USB CDC на RP2350 конфликтуют — PIO занимает прерывания, CDC не успевает обслуживаться.
 
-macOS does not load Apple DFU driver
+Решения:
 
-iTunes/Apple Configurator do not recognize device
+UART-логи (рекомендуется) — подключить USB-UART переходник к GP0/GP1
 
-Restore operation fails
+Буферизация — писать в RAM, сбрасывать в CDC только в паузах (см. LOGF в коде)
 
-Recovery: Power-cycle iPhone. Device boots normally.
+Питание — Pico и target от разных портов, без общих хабов
 
-Persistent DoS? No — primitive is single-shot per boot. After first attempt device enters semi-functional state that does not accept further DNLOAD requests.
+Device деградирует после серии экспериментов
+Симптом: после 5-7 прогонов device перестаёт отвечать на GET_DESCRIPTOR(DEVICE)
 
-4. What Was Exhaustively Ruled Out
-To achieve privilege escalation, one of the following would be needed:
+Причина: запись в чувствительные структуры SecureROM без восстановления
 
-Goal	Tested	Result
-Control over source (write arbitrary data)	8 methods	Source always NULL
-Control over destination (shift da0)	All USB parameters	da0 fixed at dev_desc+8
-Control over length (extend beyond 10 bytes)	wLength sweep	Fixed at 10 bytes
-Multi-shot (accumulate effect)	Sequential attempts	Device dies after first
-Memory disclosure	Deep GET_DESCRIPTOR (512B)	Zeroes beyond descriptor
-Reach nonce (str1)	Sweep	Not affected
-Reach serial (str4)	Sweep	Not affected
-Modify DFU state	GETSTATE/GETSTATUS	Not affected
-Exhaustive USB surface sweep performed:
+Решение: hard reset + power-cycle, пауза между запусками
 
-Standard descriptors: device, config, string (0-15), device qualifier, other-speed config, BOS
+Callback не вызывается при DNLOAD
+Симптом: after-ptr probe=0xD2 — device жив, но callback не сработал
 
-Class requests: DFU UPLOAD, GETSTATE, GETSTATUS, CLRSTATUS, SET_INTERFACE, SET_CONFIGURATION, SET_ADDRESS
+Причина: sub_100006058 уходит в error path до validator'а из-за невалидного IMG4
 
-Vendor requests: Apple class 0x40/0xC0, bRequest 0x00-0x0F
+Решение: требуется настоящий IMG4 payload — нет публичного способа обойти
 
-LANGID sweep: 16 languages
+Что дальше
+Направления для дальнейшего исследования
+Полный реверс sub_100006058 в Binary Ninja. Найти:
 
-Huge wLength: up to 1024 bytes
+Все ветки после успешного парсинга IMG4
 
-Non-zero wIndex: 0-3
+Что делает дефолтный 0x2D0
 
-All returned to same primitive behavior.
+Где формируется DEVICE дескриптор
 
-5. USB Descriptor Reference (A14 SecureROM, CPID 0x8101)
-For future researchers:
+Возможность перехватить более раннюю функцию, чем 0x2B0
 
-Device Descriptor (str 0x01, 18 bytes)
-text
-12 01 00 02 00 00 00 40 AC 05 27 12 00 00 02 03 04 01
-Config Descriptor (str 0x02, 32 bytes)
-text
-09 02 19 00 01 01 05 80 FA 09 04 00 00 00 FE 01 00 00 07 21 01 0A 00 00 08
-String Descriptors
-str0: langid list 04 03 09 04 (US English)
+Поиск валидного IMG4 для A14 в публичных IPSW:
 
-str1: NONC:XXXXXXXXXX — SecureROM nonce (regenerated per boot)
+Распаковать iBSS/iBEC
 
-str2: Apple Inc.
+Извлечь IM4P/IMG4 формат
 
-str3: Apple Mobile Device (DFU Mode)
+Подать в DNLOAD
 
-str4: CPID:8101 CPRV:11 CPFM:03 SCEP:01 BDID:0C ECID:001C21023E01001E IBFL:3C SRTG:[iBoot-5281.0.0.100.45]
+Портирование на A12/A13 — там usbliter8 работает end-to-end.
 
-str5: duplicates str3
+Проверка других ревизий A14 (A0 vs B0 vs B1) — возможно, есть более уязвимая.
 
-str6-15: empty
+Что не поможет
+Продолжение экспериментов без изменения подхода
 
-Device Qualifier (str 0x06)
-text
-0A 06 00 02 00 00 00 40 01 00
-DFU State Machine
-Default state: dfuIDLE (0x02)
+Увеличение размера записей (только ломает device)
 
+Дополнительные callback'и без понимания цепочки
 
-Conclusion
-We identified and characterized a TOCTOU race condition in Apple A14 SecureROM's DFU implementation. The primitive allows a malicious USB host to corrupt the cached device descriptor of an iPhone for ~200 ms, resulting in a re-enumeration DoS.
+Благодарности
+Paradigm Shift — за публикацию usbliter8 и технический анализ checkm8
 
-The race is real, the primitive is real, but the primitive is narrow. After exhaustive parameter sweep, we found no path to privilege escalation. This research is offered as:
+ncxcy/A15-SECUREROM-VULNS — за исследования SecureROM A15
 
-A documented vulnerability for Apple to address
+securerom.fun — за публичные дампы SecureROM
 
-Reference material for the DFU/secure-boot research community
+Binary Ninja — за HLIL декомпилятор
 
-A starting point for investigating other SecureROM generations
+Лицензия
+MIT License. См. LICENSE.
 
-DFU_GETSTATE returns 1 byte: 02
+Отказ от ответственности: данный код предоставлен только в образовательных целях. Использование против чужих устройств без разрешения владельца противозаконно. Автор не несёт ответственности за любой ущерб, включая «кирпичевание» устройств, возникший в результате использования данного проекта.
 
-DFU_GETSTATUS returns 6 bytes: bStatus=00 pollTimeout=320000 bState=02 iString=00
+Контакт
+Проект открыт для обсуждения. Pull requests и issues приветствуются.
